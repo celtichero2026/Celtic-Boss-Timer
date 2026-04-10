@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -8,21 +7,13 @@ from discord.ext import commands
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-
-# Put your timer channel ID here
-TIMER_CHANNEL_ID = 123456789012345678
-
-# Optional: file for persistence
+TIMER_CHANNEL_ID = int(os.getenv("TIMER_CHANNEL_ID"))
 DATA_FILE = "boss_timers.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# ---------------------------
-# Boss config
-# ---------------------------
 
 BOSSES = {
     "croms manikin": {
@@ -232,88 +223,55 @@ BOSSES = {
 }
 
 GROUP_ORDER = ["ENDGAME", "MIDRAID", "EDL", "DL", "FROZEN", "METEORIC", "WARDEN"]
+boss_timers = {}
 
-# boss_key -> ISO due time
-boss_timers: dict[str, str] = {}
-
-
-# ---------------------------
-# Helpers
-# ---------------------------
-
-def now_utc() -> datetime:
+def now_utc():
     return datetime.now(timezone.utc)
 
-def save_timers() -> None:
+def save_timers():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(boss_timers, f, indent=2)
 
-def load_timers() -> None:
+def load_timers():
     global boss_timers
-    if os.path.exists(DATA_FILE):
+    try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             boss_timers = json.load(f)
+    except FileNotFoundError:
+        boss_timers = {}
 
-def find_boss_key(user_input: str) -> str | None:
+def find_boss_key(user_input: str):
     cleaned = user_input.lower().strip()
     for key, boss in BOSSES.items():
-        if cleaned == key:
-            return key
-        if cleaned in boss["aliases"]:
+        if cleaned == key or cleaned in boss["aliases"]:
             return key
     return None
 
-def set_boss_timer(boss_key: str) -> datetime:
+def set_boss_timer(boss_key: str):
     due = now_utc() + timedelta(minutes=BOSSES[boss_key]["respawn_minutes"])
     boss_timers[boss_key] = due.isoformat()
     save_timers()
     return due
 
-def clear_expired_timers() -> None:
-    # Keep active timers only. You can remove this if you want to keep overdue ones showing.
-    current = now_utc()
-    expired = []
-    for boss_key, due_str in boss_timers.items():
-        due = datetime.fromisoformat(due_str)
-        if due < current:
-            expired.append(boss_key)
-
-    for boss_key in expired:
-        del boss_timers[boss_key]
-
-    if expired:
-        save_timers()
-
-def human_remaining(due: datetime) -> str:
+def human_remaining(due: datetime):
     delta = due - now_utc()
     total_seconds = int(delta.total_seconds())
-
     if total_seconds <= 0:
         return "Due now"
-
     hours, rem = divmod(total_seconds, 3600)
     minutes = rem // 60
-
     if hours > 0:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
 
-def build_active_embed() -> discord.Embed:
-    clear_expired_timers()
-
-    embed = discord.Embed(
-        title="⏳ Active Boss Times ⏳",
-        color=discord.Color.teal()
-    )
-
-    grouped: dict[str, list[str]] = {group: [] for group in GROUP_ORDER}
+def build_active_embed():
+    embed = discord.Embed(title="⏳ Active Boss Times ⏳", color=discord.Color.teal())
+    grouped = {group: [] for group in GROUP_ORDER}
 
     for boss_key, due_str in boss_timers.items():
         due = datetime.fromisoformat(due_str)
         boss = BOSSES[boss_key]
-        grouped[boss["group"]].append(
-            f"{boss['display']} • {human_remaining(due)}"
-        )
+        grouped[boss["group"]].append(f"{boss['display']} • {human_remaining(due)}")
 
     for group in GROUP_ORDER:
         if grouped[group]:
@@ -327,13 +285,7 @@ def build_active_embed() -> discord.Embed:
     if not any(grouped.values()):
         embed.description = "No active boss timers."
 
-    embed.set_footer(text=f"Game Time: {now_utc().strftime('%H:%M UTC')}")
     return embed
-
-
-# ---------------------------
-# Events
-# ---------------------------
 
 @bot.event
 async def on_ready():
@@ -347,56 +299,31 @@ async def on_message(message: discord.Message):
         return
 
     if message.channel.id != TIMER_CHANNEL_ID:
-        await bot.process_commands(message)
         return
 
     content = message.content.strip().lower()
 
     if content == ".":
         await message.channel.send(embed=build_active_embed())
-        await bot.process_commands(message)
         return
 
     boss_key = find_boss_key(content)
     if boss_key:
         due = set_boss_timer(boss_key)
         boss_name = BOSSES[boss_key]["display"]
-        remaining = human_remaining(due)
-        await message.channel.send(f"{boss_name} due {remaining}")
-        await bot.process_commands(message)
-        return
-
-    await bot.process_commands(message)
-
-
-# ---------------------------
-# Slash commands
-# ---------------------------
-
-@app_commands.describe(boss="Boss name or alias")
-@bot.tree.command(name="setboss", description="Set or reset a boss timer")
-async def setboss(interaction: discord.Interaction, boss: str):
-    boss_key = find_boss_key(boss)
-    if not boss_key:
-        await interaction.response.send_message("Boss not found.", ephemeral=True)
-        return
-
-    due = set_boss_timer(boss_key)
-    boss_name = BOSSES[boss_key]["display"]
-    await interaction.response.send_message(f"{boss_name} due {human_remaining(due)}")
+        await message.channel.send(f"{boss_name} due {human_remaining(due)}")
 
 @bot.tree.command(name="bosses", description="Show active boss timers")
 async def bosses(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_active_embed())
 
-@app_commands.describe(boss="Boss name or alias")
 @bot.tree.command(name="clearboss", description="Clear a boss timer")
+@app_commands.describe(boss="Boss name or alias")
 async def clearboss(interaction: discord.Interaction, boss: str):
     boss_key = find_boss_key(boss)
     if not boss_key:
         await interaction.response.send_message("Boss not found.", ephemeral=True)
         return
-
     if boss_key in boss_timers:
         del boss_timers[boss_key]
         save_timers()
